@@ -5,6 +5,14 @@ import { stat } from 'fs/promises';
 
 const router = express.Router();
 
+function resolveWildcardPath(rawPath: string | string[] | undefined): string {
+  if (!rawPath) return "";
+  if (Array.isArray(rawPath)) {
+    return rawPath.join("/");
+  }
+  return rawPath;
+}
+
 // Content types mapping
 const CONTENT_TYPES: Record<string, string> = {
   // Images
@@ -39,7 +47,7 @@ router.get('/uploads/*path', async (req: Request, res: Response) => {
   try {
     // Get the file path from the URL (Express 5 uses named wildcard)
     const rawPath = req.params.path || req.params[0];
-    const filePath = Array.isArray(rawPath) ? rawPath[0] : rawPath;
+    const filePath = resolveWildcardPath(rawPath);
     
     if (!filePath) {
       return res.status(400).json({ error: 'File path required' });
@@ -59,10 +67,15 @@ router.get('/uploads/*path', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
-    // Check if file exists
+    // Check if file exists and is a file
+    let fileStats;
     try {
-      await stat(fullPath);
+      fileStats = await stat(fullPath);
     } catch {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    if (!fileStats.isFile()) {
       return res.status(404).json({ error: 'File not found' });
     }
 
@@ -92,7 +105,7 @@ router.get('/uploads/*path', async (req: Request, res: Response) => {
 router.get('/outputs/*path', async (req: Request, res: Response) => {
   try {
     const rawPath = req.params.path || req.params[0];
-    const filePath = Array.isArray(rawPath) ? rawPath[0] : rawPath;
+    const filePath = resolveWildcardPath(rawPath);
     
     if (!filePath) {
       return res.status(400).json({ error: 'File path required' });
@@ -112,10 +125,15 @@ router.get('/outputs/*path', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
-    // Check if file exists
+    // Check if file exists and is a file
+    let fileStats;
     try {
-      await stat(fullPath);
+      fileStats = await stat(fullPath);
     } catch {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    if (!fileStats.isFile()) {
       return res.status(404).json({ error: 'File not found' });
     }
 
@@ -144,7 +162,7 @@ router.get('/outputs/*path', async (req: Request, res: Response) => {
 router.get('/thumbnails/*path', async (req: Request, res: Response) => {
   try {
     const rawPath = req.params.path || req.params[0];
-    const filePath = Array.isArray(rawPath) ? rawPath[0] : rawPath;
+    const filePath = resolveWildcardPath(rawPath);
     
     if (!filePath) {
       return res.status(400).json({ error: 'File path required' });
@@ -162,9 +180,14 @@ router.get('/thumbnails/*path', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid path' });
     }
 
+    let fileStats;
     try {
-      await stat(fullPath);
+      fileStats = await stat(fullPath);
     } catch {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    if (!fileStats.isFile()) {
       return res.status(404).json({ error: 'File not found' });
     }
 

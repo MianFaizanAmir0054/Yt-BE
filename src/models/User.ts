@@ -17,6 +17,7 @@ export interface IUser extends Document {
     perplexity?: string;
     pexels?: string;
     segmind?: string;
+    assemblyai?: string;
     elevenLabs?: string;
   };
   
@@ -70,6 +71,7 @@ const UserSchema = new Schema<IUser>(
       perplexity: { type: String, default: null },
       pexels: { type: String, default: null },
       segmind: { type: String, default: null },
+      assemblyai: { type: String, default: null },
       elevenLabs: { type: String, default: null },
     },
     preferences: {

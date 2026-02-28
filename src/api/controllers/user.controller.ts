@@ -3,6 +3,8 @@ import { getUser, sendSuccess, sendError, sendNotFound } from "../utils/index.js
 import { HTTP_STATUS, ERROR_MESSAGES } from "../constants/index.js";
 import { AuthenticatedRequest } from "../types/index.js";
 import * as memberService from "../services/member.service.js";
+import { decrypt, encrypt, maskApiKey } from "../../lib/encryption.js";
+import User from "../../models/User.js";
 
 /**
  * GET /api/user/me
@@ -137,5 +139,189 @@ export async function getPendingInvitations(req: Request, res: Response) {
   } catch (error) {
     console.error("Error fetching invitations:", error);
     return sendError(res, "Failed to fetch invitations");
+  }
+}
+
+/**
+ * GET /api/user/api-keys
+ * Fetch user API keys (masked) and preferences
+ */
+export async function getApiKeys(req: Request, res: Response) {
+  try {
+    const authUser = getUser(req);
+    if (!authUser) {
+      return res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: ERROR_MESSAGES.UNAUTHORIZED });
+    }
+
+    const user = await User.findOne({ email: authUser.email });
+    if (!user) {
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.USER_NOT_FOUND });
+    }
+
+    const apiKeys = user.apiKeys || {};
+
+    // Return masked keys
+    const maskedKeys = {
+      openai: apiKeys.openai ? maskApiKey(decrypt(apiKeys.openai)) : null,
+      anthropic: apiKeys.anthropic ? maskApiKey(decrypt(apiKeys.anthropic)) : null,
+      perplexity: apiKeys.perplexity ? maskApiKey(decrypt(apiKeys.perplexity)) : null,
+      pexels: apiKeys.pexels ? maskApiKey(decrypt(apiKeys.pexels)) : null,
+      segmind: apiKeys.segmind ? maskApiKey(decrypt(apiKeys.segmind)) : null,
+      assemblyai: apiKeys.assemblyai ? maskApiKey(decrypt(apiKeys.assemblyai)) : null,
+      elevenLabs: apiKeys.elevenLabs ? maskApiKey(decrypt(apiKeys.elevenLabs)) : null,
+    };
+
+    // Return which keys are configured
+    const configured = {
+      openai: !!apiKeys.openai,
+      anthropic: !!apiKeys.anthropic,
+      perplexity: !!apiKeys.perplexity,
+      pexels: !!apiKeys.pexels,
+      segmind: !!apiKeys.segmind,
+      assemblyai: !!apiKeys.assemblyai,
+      elevenLabs: !!apiKeys.elevenLabs,
+    };
+
+    return sendSuccess(res, {
+      maskedKeys,
+      configured,
+      preferences: user.preferences,
+    });
+  } catch (error) {
+    console.error("Get API keys error:", error);
+    return sendError(res, "Failed to fetch API keys");
+  }
+}
+
+/**
+ * PUT /api/user/api-keys
+ * Update user API keys and/or preferences
+ */
+export async function updateApiKeys(req: Request, res: Response) {
+  try {
+    const authUser = getUser(req);
+    if (!authUser) {
+      return res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: ERROR_MESSAGES.UNAUTHORIZED });
+    }
+
+    const { apiKeys, preferences } = req.body;
+
+    const user = await User.findOne({ email: authUser.email });
+    if (!user) {
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.USER_NOT_FOUND });
+    }
+
+    // Handle API keys update
+    if (apiKeys) {
+      const existingKeys = user.apiKeys || {};
+
+      // Update with new values (encrypt non-empty values)
+      for (const [key, value] of Object.entries(apiKeys)) {
+        if (value !== undefined) {
+          (existingKeys as Record<string, string | undefined>)[key] = value
+            ? encrypt(value as string)
+            : undefined;
+        }
+      }
+
+      user.apiKeys = existingKeys;
+    }
+
+    // Handle preferences update
+    if (preferences) {
+      user.preferences = {
+        ...user.preferences,
+        ...preferences,
+      };
+    }
+
+    await user.save();
+
+    return sendSuccess(res, {
+      message: "Settings updated successfully",
+      preferences: user.preferences,
+    });
+  } catch (error) {
+    console.error("Update API keys error:", error);
+    return sendError(res, "Failed to update settings");
+  }
+}
+
+/**
+ * DELETE /api/user/api-keys/:key
+ * Delete a specific API key
+ */
+export async function deleteApiKey(req: Request, res: Response) {
+  try {
+    const authUser = getUser(req);
+    if (!authUser) {
+      return res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: ERROR_MESSAGES.UNAUTHORIZED });
+    }
+
+    const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+    const validKeys = ["openai", "anthropic", "perplexity", "pexels", "segmind", "assemblyai", "elevenLabs"];
+    
+    if (!validKeys.includes(key)) {
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({ error: "Invalid API key name" });
+    }
+
+    const user = await User.findOne({ email: authUser.email });
+    if (!user) {
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.USER_NOT_FOUND });
+    }
+
+    // Delete the specific API key
+    if (user.apiKeys) {
+      delete (user.apiKeys as Record<string, any>)[key];
+    }
+
+    await user.save();
+
+    return sendSuccess(res, {
+      message: `API key '${key}' deleted successfully`,
+      preferences: user.preferences,
+    });
+  } catch (error) {
+    console.error("Delete API key error:", error);
+    return sendError(res, "Failed to delete API key");
+  }
+}
+
+/**
+ * DELETE /api/user/api-keys
+ * Delete all API keys
+ */
+export async function deleteAllApiKeys(req: Request, res: Response) {
+  try {
+    const authUser = getUser(req);
+    if (!authUser) {
+      return res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: ERROR_MESSAGES.UNAUTHORIZED });
+    }
+
+    const user = await User.findOne({ email: authUser.email });
+    if (!user) {
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.USER_NOT_FOUND });
+    }
+
+    // Delete all API keys
+    user.apiKeys = {
+      openai: undefined,
+      anthropic: undefined,
+      perplexity: undefined,
+      pexels: undefined,
+      segmind: undefined,
+      assemblyai: undefined,
+      elevenLabs: undefined,
+    };
+
+    await user.save();
+
+    return sendSuccess(res, {
+      message: "All API keys deleted successfully",
+      preferences: user.preferences,
+    });
+  } catch (error) {
+    console.error("Delete all API keys error:", error);
+    return sendError(res, "Failed to delete API keys");
   }
 }

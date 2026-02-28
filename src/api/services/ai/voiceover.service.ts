@@ -1,7 +1,6 @@
 import axios from "axios";
 import fs from "fs";
 import path from "path";
-import FormData from "form-data";
 
 interface WhisperWord {
   word: string;
@@ -23,51 +22,122 @@ interface WhisperAnalysisResult {
 }
 
 /**
- * Analyze audio file using OpenAI Whisper API
+ * Analyze audio file using AssemblyAI API
  */
-export async function analyzeWithWhisper(
+export async function analyzeWithAssemblyAI(
   audioFilePath: string,
   apiKey: string
 ): Promise<WhisperAnalysisResult> {
   try {
-    // Read the audio file
-    const audioBuffer = fs.readFileSync(audioFilePath);
-    const fileName = path.basename(audioFilePath);
+    if (!fs.existsSync(audioFilePath)) {
+      throw new Error(`Audio file not found: ${audioFilePath}`);
+    }
 
-    // Create form data for the API request
-    const formData = new FormData();
-    formData.append("file", audioBuffer, {
-      filename: fileName,
-      contentType: "audio/mpeg",
-    });
-    formData.append("model", "whisper-1");
-    formData.append("response_format", "verbose_json");
-    formData.append("timestamp_granularities[]", "word");
-    formData.append("timestamp_granularities[]", "segment");
-
-    const response = await axios.post(
-      "https://api.openai.com/v1/audio/transcriptions",
-      formData,
+    // Step 1: Upload audio to AssemblyAI
+    const uploadResponse = await axios.post(
+      "https://api.assemblyai.com/v2/upload",
+      fs.createReadStream(audioFilePath),
       {
         headers: {
-          Authorization: `Bearer ${apiKey}`,
-          ...formData.getHeaders(),
+          authorization: apiKey,
+          "content-type": "application/octet-stream",
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
       }
     );
 
-    const data = response.data;
+    const audioUrl = uploadResponse.data?.upload_url;
+    if (!audioUrl) {
+      throw new Error("Failed to upload audio to AssemblyAI");
+    }
+
+    // Step 2: Request transcript with word timestamps
+    const transcriptResponse = await axios.post(
+      "https://api.assemblyai.com/v2/transcript",
+      {
+        audio_url: audioUrl,
+        speech_models: ["universal-2"],
+        punctuate: true,
+        format_text: true,
+      },
+      {
+        headers: {
+          authorization: apiKey,
+          "content-type": "application/json",
+        },
+      }
+    );
+
+    const transcriptId = transcriptResponse.data?.id;
+    if (!transcriptId) {
+      throw new Error("Failed to start AssemblyAI transcription");
+    }
+
+    // Step 3: Poll transcript status
+    const maxAttempts = 120;
+    const pollIntervalMs = 2000;
+
+    let completedTranscript: {
+      status?: string;
+      error?: string;
+      text?: string;
+      words?: Array<{ text: string; start: number; end: number }>;
+    } | null = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const pollResponse = await axios.get(
+        `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
+        {
+          headers: {
+            authorization: apiKey,
+          },
+        }
+      );
+
+      const data = pollResponse.data as {
+        status?: string;
+        error?: string;
+        text?: string;
+        words?: Array<{ text: string; start: number; end: number }>;
+      };
+
+      if (data.status === "completed") {
+        completedTranscript = data;
+        break;
+      }
+
+      if (data.status === "error") {
+        throw new Error(data.error || "AssemblyAI transcription failed");
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    if (!completedTranscript) {
+      throw new Error("AssemblyAI transcription timed out");
+    }
+
+    const words = (completedTranscript.words || []).map((word, index) => ({
+      word: word.text,
+      start: Number(word.start) / 1000,
+      end: Number(word.end) / 1000,
+    }));
 
     return {
-      fullTranscript: data.text,
-      words: data.words || [],
-      segments: data.segments || [],
+      fullTranscript: completedTranscript.text || "",
+      words,
+      segments: [],
     };
   } catch (error) {
-    console.error("Whisper analysis error:", error);
-    throw new Error("Failed to analyze audio with Whisper");
+    console.error("AssemblyAI analysis error:", error);
+
+    if (axios.isAxiosError(error)) {
+      const apiError = error.response?.data as { error?: string } | undefined;
+      throw new Error(apiError?.error || "Failed to analyze audio with AssemblyAI");
+    }
+
+    throw new Error("Failed to analyze audio with AssemblyAI");
   }
 }
 

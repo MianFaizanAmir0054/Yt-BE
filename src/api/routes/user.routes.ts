@@ -41,4 +41,30 @@ router.put(
  */
 router.get("/invitations", asyncHandler(userController.getPendingInvitations));
 
+// ============ API Keys ============
+
+/**
+ * GET /api/user/api-keys
+ * Fetch user API keys (masked) and preferences
+ */
+router.get("/api-keys", asyncHandler(userController.getApiKeys));
+
+/**
+ * PUT /api/user/api-keys
+ * Update user API keys and/or preferences
+ */
+router.put("/api-keys", asyncHandler(userController.updateApiKeys));
+
+/**
+ * DELETE /api/user/api-keys/:key
+ * Delete a specific API key
+ */
+router.delete("/api-keys/:key", asyncHandler(userController.deleteApiKey));
+
+/**
+ * DELETE /api/user/api-keys
+ * Delete all API keys
+ */
+router.delete("/api-keys", asyncHandler(userController.deleteAllApiKeys));
+
 export default router;

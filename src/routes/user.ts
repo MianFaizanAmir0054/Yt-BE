@@ -353,6 +353,84 @@ router.put("/api-keys", (async (req: Request, res: Response) => {
 }) as RequestHandler);
 
 /**
+ * DELETE /api/user/api-keys/:key
+ * Delete a specific API key
+ */
+router.delete("/api-keys/:key", (async (req: Request, res: Response) => {
+  try {
+    const authUser = getUser(req);
+    if (!authUser) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const key = Array.isArray(req.params.key) ? req.params.key[0] : req.params.key;
+    const validKeys = ["openai", "anthropic", "perplexity", "pexels", "segmind", "elevenLabs"];
+    
+    if (!validKeys.includes(key)) {
+      return res.status(400).json({ error: "Invalid API key name" });
+    }
+
+    const user = await User.findOne({ email: authUser.email });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Delete the specific API key
+    if (user.apiKeys) {
+      delete (user.apiKeys as Record<string, any>)[key];
+    }
+
+    await user.save();
+
+    res.json({
+      message: `API key '${key}' deleted successfully`,
+      preferences: user.preferences,
+    });
+  } catch (error) {
+    console.error("Delete API key error:", error);
+    res.status(500).json({ error: "Failed to delete API key" });
+  }
+}) as RequestHandler);
+
+/**
+ * DELETE /api/user/api-keys
+ * Delete all API keys
+ */
+router.delete("/api-keys", (async (req: Request, res: Response) => {
+  try {
+    const authUser = getUser(req);
+    if (!authUser) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const user = await User.findOne({ email: authUser.email });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Delete all API keys
+    user.apiKeys = {
+      openai: undefined,
+      anthropic: undefined,
+      perplexity: undefined,
+      pexels: undefined,
+      segmind: undefined,
+      elevenLabs: undefined,
+    };
+
+    await user.save();
+
+    res.json({
+      message: "All API keys deleted successfully",
+      preferences: user.preferences,
+    });
+  } catch (error) {
+    console.error("Delete all API keys error:", error);
+    res.status(500).json({ error: "Failed to delete API keys" });
+  }
+}) as RequestHandler);
+
+/**
  * GET /api/user/invitations
  * Get pending workspace invitations for the current user
  */

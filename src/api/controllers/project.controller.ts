@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
+import fs from "fs/promises";
 import * as projectService from "../services/project.service.js";
+import * as workspaceService from "../services/workspace.service.js";
 import {
   getUser,
   getRouteParam,
@@ -83,6 +85,18 @@ export async function getProject(req: Request, res: Response) {
       return sendNotFound(res, ERROR_MESSAGES.PROJECT_NOT_FOUND);
     }
 
+    if (project.output?.videoPath) {
+      try {
+        await fs.access(project.output.videoPath);
+      } catch {
+        project.output = undefined;
+        if (project.status === PROJECT_STATUS.APPROVED || project.status === "completed") {
+          project.status = "processing";
+        }
+        await project.save();
+      }
+    }
+
     return sendSuccess(res, { project, permissions: access.permissions });
   } catch (error) {
     console.error("Error fetching project:", error);
@@ -113,6 +127,28 @@ export async function createProject(req: Request, res: Response) {
 
     if (!channelId) {
       return sendBadRequest(res, "Channel ID is required");
+    }
+
+    const access = await workspaceService.checkWorkspaceAccess(
+      dbUser._id.toString(),
+      workspaceId,
+      dbUser.role
+    );
+
+    if (!access.hasAccess || !access.workspace) {
+      return sendForbidden(res, ERROR_MESSAGES.NO_WORKSPACE_ACCESS);
+    }
+
+    const workspaceChannelIds = access.workspace.channelIds?.map((id) => id.toString()) || [];
+    if (!workspaceChannelIds.includes(channelId)) {
+      return sendBadRequest(res, "Channel does not belong to this workspace");
+    }
+
+    if (access.membership?.permissions?.channelIds?.length) {
+      const allowedChannelIds = access.membership.permissions.channelIds.map((id) => id.toString());
+      if (!allowedChannelIds.includes(channelId)) {
+        return sendForbidden(res, "You do not have access to this channel");
+      }
     }
 
     const project = await projectService.createProject({

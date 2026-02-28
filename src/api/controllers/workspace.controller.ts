@@ -67,16 +67,41 @@ export async function listWorkspaces(req: Request, res: Response) {
 export async function getWorkspace(req: Request, res: Response) {
   try {
     const id = getRouteParam(req, "id");
+    const user = getUser(req);
+    const dbUser = (req as AuthenticatedRequest).dbUser;
+
     const workspace = await workspaceService.findWorkspaceById(id);
 
     if (!workspace) {
       return sendNotFound(res, ERROR_MESSAGES.WORKSPACE_NOT_FOUND);
     }
 
+    // Determine user role
+    let userRole = "viewer";
+    if (dbUser?.role === USER_ROLES.SUPER_ADMIN) {
+      userRole = "owner";
+    } else if (workspace.ownerId.toString() === dbUser?._id.toString()) {
+      userRole = "owner";
+    } else {
+      // Check if user is a member with a specific role
+      const membership = await memberService.getMemberByUserAndWorkspace(
+        dbUser?._id?.toString() || user?.id || "",
+        id
+      );
+      if (membership) {
+        userRole = membership.role;
+      }
+    }
+
     // Get additional stats
     const stats = await workspaceService.getWorkspaceStats(id);
 
-    return sendSuccess(res, { workspace, stats });
+    return sendSuccess(res, {
+      workspace,
+      memberCount: stats.members,
+      projectCount: stats.projects,
+      userRole,
+    });
   } catch (error) {
     console.error("Error fetching workspace:", error);
     return sendError(res, "Failed to fetch workspace");

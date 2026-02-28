@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import path from "path";
 import fs from "fs/promises";
+import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
 import * as projectService from "../services/project.service.js";
 import {
@@ -8,7 +9,7 @@ import {
   generateScript,
   generateImagePrompts,
   generateSceneImages,
-  analyzeWithWhisper,
+  analyzeWithAssemblyAI,
   mapScenesToTimestamps,
   generateHashtags,
 } from "../services/ai/index.js";
@@ -41,8 +42,141 @@ async function getUserApiKeys(userId: string) {
     perplexity: user.apiKeys.perplexity ? decrypt(user.apiKeys.perplexity) : undefined,
     pexels: user.apiKeys.pexels ? decrypt(user.apiKeys.pexels) : undefined,
     segmind: user.apiKeys.segmind ? decrypt(user.apiKeys.segmind) : undefined,
+    assemblyai: user.apiKeys.assemblyai ? decrypt(user.apiKeys.assemblyai) : undefined,
     elevenLabs: user.apiKeys.elevenLabs ? decrypt(user.apiKeys.elevenLabs) : undefined,
   };
+}
+
+function getVideoDimensions(aspectRatio: "9:16" | "16:9" | "1:1") {
+  if (aspectRatio === "16:9") {
+    return { width: 1920, height: 1080 };
+  }
+
+  if (aspectRatio === "1:1") {
+    return { width: 1080, height: 1080 };
+  }
+
+  return { width: 1080, height: 1920 };
+}
+
+function toFfmpegPath(filePath: string) {
+  return filePath.replace(/\\/g, "/").replace(/'/g, "'\\''");
+}
+
+async function ensureFileExists(filePath: string, label: string) {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      throw new Error(`${label} is not a file: ${filePath}`);
+    }
+  } catch {
+    throw new Error(`${label} not found: ${filePath}`);
+  }
+}
+
+async function assembleVideoWithFfmpeg(options: {
+  scenes: Array<{ imagePath: string; duration: number }>;
+  voiceoverPath: string;
+  outputPath: string;
+  aspectRatio: "9:16" | "16:9" | "1:1";
+}) {
+  const { scenes, voiceoverPath, outputPath, aspectRatio } = options;
+  const ffmpegBin = process.env.FFMPEG_PATH || "ffmpeg";
+
+  if (scenes.length === 0) {
+    throw new Error("No scenes available for video assembly");
+  }
+
+  await ensureFileExists(voiceoverPath, "Voiceover file");
+
+  for (const scene of scenes) {
+    await ensureFileExists(scene.imagePath, `Scene image`);
+  }
+
+  const concatFilePath = path.join(path.dirname(outputPath), `concat-${uuidv4()}.txt`);
+  const concatContent = [
+    ...scenes.flatMap((scene) => [
+      `file '${toFfmpegPath(scene.imagePath)}'`,
+      `duration ${Math.max(0.5, scene.duration).toFixed(3)}`,
+    ]),
+    `file '${toFfmpegPath(scenes[scenes.length - 1].imagePath)}'`,
+  ].join("\n");
+
+  await fs.writeFile(concatFilePath, concatContent, "utf-8");
+
+  const { width, height } = getVideoDimensions(aspectRatio);
+  const videoFilter = [
+    `scale=${width}:${height}:force_original_aspect_ratio=cover`,
+    `crop=${width}:${height}`,
+    "format=yuv420p",
+  ].join(",");
+
+  const args = [
+    "-y",
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    concatFilePath,
+    "-i",
+    voiceoverPath,
+    "-vf",
+    videoFilter,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "23",
+    "-r",
+    "30",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "192k",
+    "-shortest",
+    outputPath,
+  ];
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const ffmpeg = spawn(ffmpegBin, args, {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let stderrOutput = "";
+
+      ffmpeg.stderr.on("data", (chunk) => {
+        stderrOutput += chunk.toString();
+      });
+
+      ffmpeg.on("error", (error) => {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === "ENOENT") {
+          reject(new Error("FFmpeg is not installed or not available in PATH. Set FFMPEG_PATH or install ffmpeg."));
+          return;
+        }
+
+        reject(error);
+      });
+
+      ffmpeg.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+
+        const lines = stderrOutput.split("\n").slice(-12).join("\n").trim();
+        reject(new Error(lines ? `FFmpeg failed: ${lines}` : `FFmpeg failed with exit code ${code}`));
+      });
+    });
+  } finally {
+    await fs.unlink(concatFilePath).catch(() => undefined);
+  }
 }
 
 /**
@@ -181,14 +315,14 @@ export async function uploadVoiceover(req: Request, res: Response) {
 
     // Get user API keys
     const apiKeys = await getUserApiKeys(dbUser._id.toString());
-    if (!apiKeys?.openai) {
-      return sendBadRequest(res, "OpenAI API key is required for audio analysis");
+    if (!apiKeys?.assemblyai) {
+      return sendBadRequest(res, "AssemblyAI API key is required for audio analysis");
     }
 
     try {
-      // Analyze with Whisper
-      console.log("Analyzing voiceover with Whisper...");
-      const whisperResult = await analyzeWithWhisper(file.path, apiKeys.openai);
+      // Analyze with AssemblyAI
+      console.log("Analyzing voiceover with AssemblyAI...");
+      const whisperResult = await analyzeWithAssemblyAI(file.path, apiKeys.assemblyai);
 
       // Save voiceover data
       project.voiceover = {
@@ -225,7 +359,7 @@ export async function uploadVoiceover(req: Request, res: Response) {
           duration: st.duration,
           sceneText: st.text,
           sceneDescription: project.script!.scenes.find(s => s.id === st.sceneId)?.visualDescription || "",
-          imagePrompt: "",
+          imagePrompt: "Pending prompt generation",
           imageSource: "uploaded" as const,
           subtitles: st.subtitles,
         })),
@@ -449,8 +583,6 @@ export async function generateVideo(req: Request, res: Response) {
         );
       }
 
-      // For now, mark as completed with placeholder video info
-      // Full video assembly would require ffmpeg integration
       const outputDir = path.join(
         process.cwd(),
         "outputs",
@@ -460,20 +592,40 @@ export async function generateVideo(req: Request, res: Response) {
 
       await fs.mkdir(outputDir, { recursive: true });
 
+      const outputVideoPath = path.join(outputDir, "output.mp4");
+
+      const scenes = [...project.timeline.scenes]
+        .filter((scene) => Boolean(scene.imagePath))
+        .sort((a, b) => a.order - b.order)
+        .map((scene) => ({
+          imagePath: scene.imagePath as string,
+          duration:
+            typeof scene.duration === "number" && scene.duration > 0
+              ? scene.duration
+              : Math.max(0.5, scene.endTime - scene.startTime),
+        }));
+
+      await assembleVideoWithFfmpeg({
+        scenes,
+        voiceoverPath: project.voiceover.filePath,
+        outputPath: outputVideoPath,
+        aspectRatio: project.aspectRatio,
+      });
+
       project.output = {
-        videoPath: path.join(outputDir, "output.mp4"), // Placeholder
+        videoPath: outputVideoPath,
         hashtags,
         generatedAt: new Date(),
       };
-
       project.status = "completed";
+
       await project.save();
 
       return sendSuccess(res, {
-        message: "Video generation queued",
+        message: "Video generated successfully",
         output: {
-          hashtags: project.output.hashtags,
-          status: "processing",
+          hashtags,
+          status: project.status,
         },
       });
     } catch (error) {
@@ -483,7 +635,8 @@ export async function generateVideo(req: Request, res: Response) {
     }
   } catch (error) {
     console.error("Video generation error:", error);
-    return sendError(res, "Failed to generate video");
+    const errorMessage = error instanceof Error ? error.message : "Failed to generate video";
+    return sendError(res, errorMessage);
   }
 }
 
@@ -582,7 +735,7 @@ export async function addTimelineScene(req: Request, res: Response) {
       duration: scene?.duration || 0,
       sceneText: scene?.sceneText || "",
       sceneDescription: scene?.sceneDescription || "",
-      imagePrompt: scene?.imagePrompt || "",
+      imagePrompt: scene?.imagePrompt || "Pending prompt generation",
       imagePath: scene?.imagePath,
       imageSource: scene?.imageSource || "uploaded" as const,
       subtitles: scene?.subtitles || [],
