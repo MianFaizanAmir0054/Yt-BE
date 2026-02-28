@@ -1,6 +1,10 @@
 import axios from "axios";
 import fs from "fs";
 import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 interface WhisperWord {
   word: string;
@@ -257,7 +261,7 @@ export function mapScenesToTimestamps(
 }
 
 /**
- * Get audio duration using ffprobe (if available) or estimate from whisper data
+ * Get audio duration using ffprobe, falling back to estimation
  */
 export async function getAudioDuration(
   audioFilePath: string,
@@ -273,7 +277,96 @@ export async function getAudioDuration(
     return whisperWords[whisperWords.length - 1].end;
   }
 
-  // TODO: Implement ffprobe-based duration detection
-  // For now, return a default
+  // Try ffprobe
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      audioFilePath,
+    ]);
+    const duration = parseFloat(stdout.trim());
+    if (!isNaN(duration) && duration > 0) {
+      return duration;
+    }
+  } catch {
+    console.warn("ffprobe not available, falling back to file-size estimation");
+  }
+
+  // Rough estimate: assume ~128kbps MP3 → 16 KB/s
+  try {
+    const stats = fs.statSync(audioFilePath);
+    const estimatedDuration = stats.size / 16000;
+    if (estimatedDuration > 0) return estimatedDuration;
+  } catch {}
+
   return 60;
+}
+
+/**
+ * Generate timestamps and subtitles directly from the script text + audio duration.
+ * This skips transcription entirely — useful when the audio is TTS-generated from the script.
+ */
+export function generateTimestampsFromScript(
+  scenes: Array<{ id: string; text: string }>,
+  audioDuration: number
+): SceneTimestamp[] {
+  const results: SceneTimestamp[] = [];
+
+  // Count total words across all scenes to distribute time proportionally
+  const sceneWordCounts = scenes.map((s) => s.text.split(/\s+/).filter(Boolean));
+  const totalWords = sceneWordCounts.reduce((sum, w) => sum + w.length, 0);
+
+  if (totalWords === 0) {
+    // Edge case: no text, split evenly
+    const perScene = audioDuration / scenes.length;
+    return scenes.map((scene, i) => ({
+      sceneId: scene.id,
+      startTime: i * perScene,
+      endTime: (i + 1) * perScene,
+      duration: perScene,
+      text: scene.text,
+      subtitles: [],
+    }));
+  }
+
+  const secondsPerWord = audioDuration / totalWords;
+  let cursor = 0; // current time in seconds
+
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const words = sceneWordCounts[i];
+    const sceneDuration = words.length * secondsPerWord;
+    const startTime = cursor;
+    const endTime = cursor + sceneDuration;
+
+    // Build word-level subtitles
+    const subtitles: SceneTimestamp["subtitles"] = [];
+    let wordCursor = startTime;
+
+    for (let w = 0; w < words.length; w++) {
+      const wordStart = wordCursor;
+      const wordEnd = wordCursor + secondsPerWord;
+      subtitles.push({
+        id: `${scene.id}_sub_${w}`,
+        start: parseFloat(wordStart.toFixed(3)),
+        end: parseFloat(wordEnd.toFixed(3)),
+        text: words[w],
+      });
+      wordCursor = wordEnd;
+    }
+
+    results.push({
+      sceneId: scene.id,
+      startTime: parseFloat(startTime.toFixed(3)),
+      endTime: parseFloat(endTime.toFixed(3)),
+      duration: parseFloat(sceneDuration.toFixed(3)),
+      text: scene.text,
+      subtitles,
+    });
+
+    cursor = endTime;
+  }
+
+  return results;
 }

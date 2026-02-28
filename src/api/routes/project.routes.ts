@@ -143,6 +143,12 @@ router.post(
 router.post("/:id/images", validateObjectId("id"), asyncHandler(generationController.generateImages));
 
 /**
+ * POST /api/projects/:id/scene-videos
+ * Generate AI video clips for each scene using Fabric 1.0
+ */
+router.post("/:id/scene-videos", validateObjectId("id"), asyncHandler(generationController.generateSceneVideosEndpoint));
+
+/**
  * POST /api/projects/:id/generate
  * Generate/assemble the final video
  */

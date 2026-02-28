@@ -17,6 +17,7 @@ export interface IScene {
   sceneDescription: string;
   imagePrompt: string;
   imagePath?: string;
+  videoPath?: string;
   imageSource: "ai-generated" | "stock" | "uploaded" | "google";
   subtitles: ISubtitle[];
 }
@@ -39,6 +40,7 @@ export interface IProject extends Document {
     | "script-ready"
     | "voiceover-uploaded"
     | "images-ready"
+    | "videos-ready"
     | "processing"
     | "completed"
     | "failed"
@@ -129,6 +131,7 @@ const SceneSchema = new Schema<IScene>(
     sceneDescription: { type: String, required: true },
     imagePrompt: { type: String, required: true },
     imagePath: { type: String, default: null },
+    videoPath: { type: String, default: null },
     imageSource: {
       type: String,
       enum: ["ai-generated", "stock", "uploaded", "google"],
@@ -176,6 +179,7 @@ const ProjectSchema = new Schema<IProject>(
         "script-ready",
         "voiceover-uploaded",
         "images-ready",
+        "videos-ready",
         "processing",
         "completed",
         "failed",

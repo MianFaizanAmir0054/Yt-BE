@@ -19,6 +19,8 @@ export interface IUser extends Document {
     segmind?: string;
     assemblyai?: string;
     elevenLabs?: string;
+    fal?: string;
+    replicate?: string;
   };
   
   preferences?: {
@@ -73,6 +75,8 @@ const UserSchema = new Schema<IUser>(
       segmind: { type: String, default: null },
       assemblyai: { type: String, default: null },
       elevenLabs: { type: String, default: null },
+      fal: { type: String, default: null },
+      replicate: { type: String, default: null },
     },
     preferences: {
       defaultLLM: {
