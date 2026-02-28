@@ -628,7 +628,7 @@ export async function generateSceneVideosEndpoint(req: Request, res: Response) {
       return res.status(HTTP_STATUS.UNAUTHORIZED).json({ error: ERROR_MESSAGES.UNAUTHORIZED });
     }
 
-    const { resolution = "480p" } = req.body;
+    const { resolution = "480p", useExisting = false } = req.body;
 
     // Check access
     const access = await projectService.checkProjectAccess(
@@ -657,6 +657,130 @@ export async function generateSceneVideosEndpoint(req: Request, res: Response) {
       return sendBadRequest(res, `${missingImages.length} scene(s) are missing images`);
     }
 
+    // --- "Use Existing Videos" mode: skip Replicate, scan disk for existing video files ---
+    if (useExisting) {
+      // 1. Try project-specific videos dir first
+      const projectVideosDir = path.join(
+        process.cwd(),
+        "uploads",
+        dbUser._id.toString(),
+        id,
+        "videos"
+      );
+
+      // 2. Centralized test videos directory (shared across all projects)
+      const testVideosDir = path.join(
+        process.cwd(),
+        "uploads",
+        "697d3ed696291e8ef219312d",
+        "69834db91bb0fc48cc430d8f",
+        "videos"
+      );
+
+      // Scan project dir first, fall back to centralized test dir
+      let videosDir = projectVideosDir;
+      let existingFiles: string[] = [];
+
+      try {
+        existingFiles = (await fs.readdir(projectVideosDir)).filter((f) => f.endsWith(".mp4"));
+      } catch {
+        existingFiles = [];
+      }
+
+      if (existingFiles.length === 0) {
+        try {
+          existingFiles = (await fs.readdir(testVideosDir)).filter((f) => f.endsWith(".mp4"));
+          videosDir = testVideosDir;
+          console.log(`[useExisting] No videos in project dir, using centralized test dir: ${testVideosDir}`);
+        } catch {
+          existingFiles = [];
+        }
+      }
+
+      if (existingFiles.length === 0) {
+        return sendBadRequest(res, "No video files found. Generate videos first or disable the toggle.");
+      }
+
+      // Sort files alphabetically for consistent ordering
+      existingFiles.sort();
+
+      // Copy videos into the project dir if using centralized test dir
+      const projectOutputDir = projectVideosDir;
+      if (videosDir !== projectVideosDir) {
+        await fs.mkdir(projectOutputDir, { recursive: true });
+      }
+
+      let validCount = 0;
+      const results: Array<{ sceneId: string; success: boolean; error?: string }> = [];
+      const sortedScenes = [...project.timeline.scenes].sort((a, b) => a.order - b.order);
+
+      for (let i = 0; i < sortedScenes.length; i++) {
+        const scene = sortedScenes[i];
+
+        // First check if scene already has a valid videoPath on disk
+        if (scene.videoPath) {
+          try {
+            await fs.stat(scene.videoPath);
+            validCount++;
+            results.push({ sceneId: scene.id, success: true });
+            continue;
+          } catch {
+            // videoPath in DB is stale, reassign
+          }
+        }
+
+        // Try to match by sceneId pattern first
+        let matchingFile = existingFiles.find((f) => f.includes(`scene-video-${scene.id}-`));
+
+        // Fall back: assign by order (scene index → file index, wrapping if fewer files)
+        if (!matchingFile && existingFiles.length > 0) {
+          matchingFile = existingFiles[i % existingFiles.length];
+        }
+
+        if (matchingFile) {
+          const srcPath = path.join(videosDir, matchingFile);
+          let finalPath: string;
+
+          if (videosDir !== projectVideosDir) {
+            // Copy the test video into the project's own videos dir
+            const destFile = `scene-video-${scene.id}-${matchingFile}`;
+            const destPath = path.join(projectOutputDir, destFile);
+            try {
+              await fs.copyFile(srcPath, destPath);
+              finalPath = destPath;
+            } catch {
+              finalPath = srcPath;
+            }
+          } else {
+            finalPath = srcPath;
+          }
+
+          const relativePath = path.relative(process.cwd(), finalPath).replace(/\\/g, "/");
+          scene.videoPath = relativePath;
+          validCount++;
+          results.push({ sceneId: scene.id, success: true });
+        } else {
+          results.push({ sceneId: scene.id, success: false, error: "No video file available" });
+        }
+      }
+
+      if (validCount === 0) {
+        return sendBadRequest(res, "Could not assign any video files to scenes. Regenerate videos.");
+      }
+
+      project.status = "videos-ready";
+      await project.save();
+
+      console.log(`[useExisting] Assigned ${validCount}/${sortedScenes.length} scenes from ${videosDir === testVideosDir ? "centralized test" : "project"} dir`);
+
+      return sendSuccess(res, {
+        message: `Reusing existing videos: ${validCount} matched, ${results.filter((r) => !r.success).length} missing`,
+        results,
+        timeline: project.timeline,
+      });
+    }
+
+    // --- Normal mode: generate via Replicate ---
     // Get user API keys
     const apiKeys = await getUserApiKeys(dbUser._id.toString());
     const replicateToken = apiKeys?.replicate || process.env.REPLICATE_API_TOKEN;
